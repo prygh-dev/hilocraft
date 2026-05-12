@@ -50,8 +50,12 @@ public class ExampleMod
             logger.error("CRITICAL: Cubic Chunks API is NOT working. Is the CoreMod loaded?");
         }
 
-        event.registerServerCommand(new CommandWriteCCblockdata());
+        event.registerServerCommand(new CommandWriteCCblockdata()); //not needed?
+
         event.registerServerCommand(new CommandLoadBinary());
+        event.registerServerCommand(new CommandBanyan());
+        event.registerServerCommand(new CommandPathPaint());
+        event.registerServerCommand(new CommandTree());
 
     }
 }

@@ -12,6 +12,8 @@ import net.minecraft.command.ICommandSender;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.WorldServer;
+import net.minecraft.block.BlockSlab;
+import net.minecraft.block.BlockStoneSlab;
 
 import java.io.*;
 import java.util.*;
@@ -35,7 +37,7 @@ public class CommandLoadBinary extends CommandBase {
     private int unsavedCubes = 0;
     private static final int SAVE_INTERVAL = 14;
 
-    final int yOffset = 4;
+    final int yOffset = 3; //used to be 4. Sea level was off by a block so changed it to 3
 
     double minX = Double.MAX_VALUE;
     double maxY = -Double.MAX_VALUE;
@@ -96,6 +98,7 @@ public class CommandLoadBinary extends CommandBase {
     class MC_Coord {
         int mcX, mcZ, mcY;
         String blockName;
+        String block_variant = "";
         boolean above_ground;
         double height_above_ground;
         boolean is_street;
@@ -135,23 +138,60 @@ public class CommandLoadBinary extends CommandBase {
             this.mcZ = (int) Math.round((maxY - y) * 2.0);
 
             if(top_h && this.is_building || top_h && is_street || top_h && this.height_above_ground >= 3.0) {
-                double slabY = roundToHalf(h * 2.0) + yOffset;
-                this.mcY = (int) Math.ceil(slabY);
+            //if(top_h && (this.is_building || this.is_street)) {
+                double slabY = roundToHalf(h * 2.0) + yOffset; //0.625 -> 1.25 -> 1.5
+                this.mcY = (int) Math.ceil(slabY); //slab at 2.0
                 this.is_slab = Math.abs(slabY % 1.0 - 0.5) < 0.001;
-
             }
             else {
-                this.mcY = (int) Math.round(h * 2.0) + yOffset;
+                if((h*2.0) % 1.0 < 0.125) {
+                    this.mcY = (int) Math.round(h * 2.0) + yOffset;
+                } else {
+                    this.mcY = (int) Math.ceil(h * 2.0) + yOffset;  //0.125 -> 0.25 -> 1.0
+                }
                 this.is_slab = false;
             }
 
+            if(this.mcY <= yOffset) {
+                this.blockName = "minecraft:water";
+                this.is_slab = false;
+            }
+            else if(!this.above_ground && !this.is_street) {
+                this.blockName = "minecraft:grass";
+                this.is_slab = false;
+            }
+            else if(this.is_street && !this.is_building) {
+                if(this.is_slab) {
+                    this.blockName = "minecraft:stone_slab";
+                    this.block_variant = "netherbrick";
+                }
+                else {
+                    this.blockName = "minecraft:stone";
+                }
+            }
+            else if(this.is_building) {
+                if(this.is_slab) {
+                    this.blockName = "minecraft:stone_slab";
+                }
+                else {
+                    this.blockName = "minecraft:double_stone_slab";
+                }
+            }
+            else {
+                this.blockName = "minecraft:grass";
+                this.is_slab = false;
+            }
+
+            /*
             this.blockName = this.mcY <= yOffset ? "minecraft:water"
                     : !this.above_ground && !this.is_street? "minecraft:grass"
-                    : (this.is_street || this.is_building) && this.is_slab ? "minecraft:stone_slab"
+                    : (this.is_street && !this.is_building) && this.is_slab ? "minecraft:stone_slab"
                     : (this.is_street || this.is_building) ? "minecraft:double_stone_slab"
                     : (this.height_above_ground > 0.0 && this.is_slab) ? "minecraft:stone_slab"
                     : (this.height_above_ground > 0.0) ? "minecraft:double_stone_slab"
                     : "minecraft:grass";
+
+             */
         }
 
         void setBlockName(String blockName) {
@@ -215,10 +255,15 @@ public class CommandLoadBinary extends CommandBase {
                         n = 0;
                     }
                     IBlockState state = block.getDefaultState();
-                    if(b.blockName.equalsIgnoreCase("minecraft:stone_slab")) {
-                        state = block.getDefaultState().withProperty(BlockSlab.HALF, BlockSlab.EnumBlockHalf.BOTTOM);
+                    if(b.is_slab) {
+                        state = state.withProperty(BlockSlab.HALF, BlockSlab.EnumBlockHalf.BOTTOM);
+                    }
+                    if(b.block_variant.equalsIgnoreCase("netherbrick")) {
+                        state = state.withProperty(BlockStoneSlab.VARIANT, BlockStoneSlab.EnumType.NETHERBRICK);
                     }
 
+                    //world.setBlockState(base.add(mcX, mcY, mcZ), state, 3);
+                    //touchedCubes.add(cubeX + "," + lowest_ycube_key + "," + cubeZ);
                     cube.setBlockState(base.add(mcX, mcY, mcZ), state);
                     n++;
                 }
@@ -243,6 +288,23 @@ public class CommandLoadBinary extends CommandBase {
     }
 
 
+    private String addToCache(MC_Coord block_data, boolean is_top) {
+        int cubeX = block_data.mcX >> 4;
+        int cubeZ = block_data.mcZ >> 4;
+        //int cubeY = block_data.mcY >> 4;
+
+        int localX = block_data.mcX & 15;
+        int localZ = block_data.mcZ & 15;
+        int xzKey = localX * 16 + localZ;
+        String key = packKey(cubeX, cubeZ);
+
+        cube_cache.computeIfAbsent(key, k -> new HashMap<>())
+                .computeIfAbsent(xzKey, k -> new CubicChunkColumn())
+                .addBlock(block_data, !block_data.above_ground);
+
+        return key;
+
+    }
 
     @Override
     public void execute(MinecraftServer server, ICommandSender sender, String[] args)
@@ -270,6 +332,10 @@ public class CommandLoadBinary extends CommandBase {
                 in.readDouble(); // mrr
                 in.readFloat(); //is_street
                 in.readFloat(); //is_building
+                in.readFloat(); //is_building_edge
+                in.readFloat();  // metres down
+
+
 
                 if (x < minX) minX = x;
                 if (y > maxY) maxY = y;
@@ -306,41 +372,99 @@ public class CommandLoadBinary extends CommandBase {
                 double  mrr = in.readDouble();
                 boolean is_street = in.readFloat() != 0.0f;
                 boolean is_building = in.readFloat() != 0.0f;
+                boolean is_building_edge = in.readFloat() != 0.0f;
+                double wall_depth_below = in.readFloat();  // metres
+
+
+                if(is_street && !is_building && dtm > 2) {
+                    //dtm = roundToHalf(dtm * 2.0) / 2.0;
+                    oh = 0.0;
+                }
+
 
                 //add column to cube dict
                 float step = 0.5f;
 
                 if(dsm < 0.5) continue;
 
-                for(double h = dtm; h < dtm + oh + 0.5; h += 0.5) {
+                final int ROOF_THICKNESS = 2;  // number of blocks below the roof to fill
 
-                    boolean is_top = h + 0.5f >= dtm + oh + 0.5f;
+                if(is_building && !is_building_edge && wall_depth_below == 0.0) {
+                    double h_ground = dtm;
+                    double h_roof   = dtm + oh;
 
-                    MC_Coord block_data = this.new MC_Coord(x, y, dtm, h, is_top, is_street, is_building);
-                    int cubeX = block_data.mcX >> 4;
-                    int cubeZ = block_data.mcZ >> 4;
-                    //int cubeY = block_data.mcY >> 4;
+                    MC_Coord ground = this.new MC_Coord(x, y, dtm, h_ground, false, is_street, is_building);
+                    addToCache(ground, false);
 
-                    int localX = block_data.mcX & 15;
-                    int localZ = block_data.mcZ & 15;
-                    int xzKey  = localX * 16 + localZ;
-                    String key = packKey(cubeX, cubeZ);
+                    // Place ROOF_THICKNESS blocks downward from the roof
+                    String cubekey = null;
+                    for(int i = 0; i < ROOF_THICKNESS; i++) {
+                        double h = h_roof - (i * 0.5);
+                        if(h <= h_ground) break;  // don't go below the ground block
+                        boolean is_top = (i == 0);  // only the topmost block uses slab logic
 
-
-                    cube_cache.computeIfAbsent(key, k -> new HashMap<>())
-                            .computeIfAbsent(xzKey, k -> new CubicChunkColumn())
-                            .addBlock(block_data, !block_data.above_ground);
-
-
-                    //TODO might have to add a check here to make sure we're at the end of the column (at object height)
-                    // if not, then skip the cube cache size check (do "continue")
-
-                    //notifyCommandListener(sender, this, cube_cache.get(key).size() + "");
-
-                    if (is_top && cube_cache.get(key).size() >= 256) {
-                        flushCube(key, server, sender, row, rowCount);
+                        MC_Coord block = this.new MC_Coord(x, y, dtm, h, is_top, is_street, is_building);
+                        cubekey = addToCache(block, is_top);
                     }
 
+                    if (cubekey != null && cube_cache.get(cubekey).size() >= 256) {
+                        flushCube(cubekey, server, sender, row, rowCount);
+                    }
+
+                    /*
+                    // Fully interior, no wall — just ground + roof
+                    double h_ground = dtm;
+                    double h_roof   = dtm + oh;
+
+                    MC_Coord ground = this.new MC_Coord(x, y, dtm, h_ground, false, is_street, is_building);
+                    MC_Coord roof   = this.new MC_Coord(x, y, dtm, h_roof,   true,  is_street, is_building);
+
+                    addToCache(ground, false);
+                    String cubekey = addToCache(roof, true);
+                    if (cube_cache.get(cubekey).size() >= 256) {
+                        flushCube(cubekey, server, sender, row, rowCount);
+                    }*/
+                } else if(is_building && wall_depth_below > 0.0) {
+                    // Has a wall — place ground, then column from (roof - wall_depth_below) up to roof
+                    double h_ground = dtm;
+                    double h_roof   = dtm + oh;
+                    double h_wall_bottom = h_roof - wall_depth_below;
+
+                    MC_Coord ground = this.new MC_Coord(x, y, dtm, h_ground, false, is_street, is_building);
+                    addToCache(ground, false);
+
+                    int wallSteps = (int) Math.round(wall_depth_below * 2.0) + 1;
+                    String cubekey = null;
+                    for(int i = 0; i < wallSteps; i++) {
+                        double h = h_wall_bottom + (i * 0.5);
+                        boolean is_top = (i == wallSteps - 1);
+                        MC_Coord block = this.new MC_Coord(x, y, dtm, h, is_top, is_street, is_building);
+                        cubekey = addToCache(block, is_top);
+                    }
+                    if (cubekey != null && cube_cache.get(cubekey).size() >= 256) {
+                        flushCube(cubekey, server, sender, row, rowCount);
+                    }
+
+                } else {
+
+                    int halfSteps = (int) Math.round((oh + 0.5) * 2.0);
+                    for (int i = 0; i < halfSteps; i++) {
+                        double h = dtm + (i * 0.5);
+                        boolean is_top = (i == halfSteps - 1);
+
+                        MC_Coord block_data = this.new MC_Coord(x, y, dtm, h, is_top, is_street, is_building);
+                        String cubekey = addToCache(block_data, is_top);
+
+                        //TODO might have to add a check here to make sure we're at the end of the column (at object height)
+                        // if not, then skip the cube cache size check (do "continue")
+
+                        //notifyCommandListener(sender, this, cube_cache.get(key).size() + "");
+
+                        if (is_top && cube_cache.get(cubekey).size() >= 256) {
+                            flushCube(cubekey, server, sender, row, rowCount);
+                        }
+
+                    }
                 }
             }
             //finally, iterate over xz coords one last time to calculate neighbor dtms and set blocks
@@ -434,10 +558,17 @@ public class CommandLoadBinary extends CommandBase {
                             //notifyCommandListener(sender, this, "setting ground filler");
 
                             IBlockState state = block.getDefaultState();
-                            if(b.blockName.equalsIgnoreCase("minecraft:stone_slab")) {
-                                state = block.getDefaultState().withProperty(BlockSlab.HALF, BlockSlab.EnumBlockHalf.BOTTOM);
+                            if(b.is_slab) {
+                                state = state.withProperty(BlockSlab.HALF, BlockSlab.EnumBlockHalf.BOTTOM);
                             }
+                            if(b.block_variant.equalsIgnoreCase("netherbrick")) {
+                                state = state.withProperty(BlockStoneSlab.VARIANT, BlockStoneSlab.EnumType.NETHERBRICK);
+                            }
+                            //TODO...
+
                             cube.setBlockState(base.add(mcX, mcY, mcZ), state);
+                            //world.setBlockState(base.add(mcX, mcY, mcZ), state, 3);
+                            //touchedCubes.add(cubeX + "," + lowest_ycube_key + "," + cubeZ);
                         }
 
                         unsavedCubes++;
@@ -456,10 +587,21 @@ public class CommandLoadBinary extends CommandBase {
 
                 }
 
-
-
             }
 
+            /*
+            notifyCommandListener(sender, this, "Notifying FP2 about " + touchedCubes.size() + " cubes...");
+            for (String cubeKey : touchedCubes) {
+                String[] cparts = cubeKey.split(",");
+                int cx = Integer.parseInt(cparts[0]);
+                int cy = Integer.parseInt(cparts[1]);
+                int cz = Integer.parseInt(cparts[2]);
+                BlockPos notifyPos = new BlockPos(cx * 16, cy * 16, cz * 16);
+                IBlockState st = world.getBlockState(notifyPos);
+                world.notifyBlockUpdate(notifyPos, st, st, 3);
+            }
+            cubeProvider.saveChunks(true);
+             */
 
             notifyCommandListener(sender, this, "Done reading " + rowCount + " rows.");
 
